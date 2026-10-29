@@ -1,0 +1,104 @@
+# Two containers: n8n, and one Postgres that holds both n8n's own state and
+# our application tables - in SEPARATE SCHEMAS of the same database.
+#
+# One database and two schemas, rather than two databases, because the
+# workflow needs a Postgres credential anyway and this way it is one
+# credential pointing at `intake`. The separation that matters is not which
+# database the rows live in, it is that nothing in the `intake` schema is
+# n8n's to rewrite on an upgrade.
+#
+# Ports are 5678 and 5436 because 5432-5435 and 3000-3001 are already taken on
+# this machine by unrelated stacks. Nothing here touches them.
+
+name: charger-fault-intake
+
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: intake-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5436:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      # Runs ONCE, on an empty data directory only. Editing a file in here and
+      # restarting does nothing - that surprise costs an hour the first time.
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  n8n:
+    image: n8nio/n8n:2.45.6
+    container_name: n8n
+    restart: unless-stopped
+    # Not `latest`, and not `stable` either. On 2026-10-29 the registry's
+    # `stable` tag still points at the 1.123.x line while the docs call 2.45.x
+    # stable, so the tag and the documentation disagree. A pinned version is
+    # the only way the screenshots in the README stay true.
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "5678:5678"
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: db
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_POSTGRESDB_SCHEMA: n8n
+
+      # Credentials saved in the UI are encrypted at rest with this key. Lose
+      # it and every stored credential is unreadable - the workflows survive,
+      # the passwords inside them do not. It is in .env, which is gitignored,
+      # and it is the one value in this project worth backing up by hand.
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+
+      # The URL n8n prints for a webhook node. Without it n8n guesses from the
+      # request, and a webhook you cannot address is a workflow you cannot
+      # trigger - which looks like a broken workflow, not a wrong setting.
+      WEBHOOK_URL: http://localhost:5678/
+      N8N_HOST: localhost
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      # Required because we serve plain http locally; n8n refuses to set its
+      # session cookie otherwise and the login screen loops silently.
+      N8N_SECURE_COOKIE: "false"
+
+      GENERIC_TIMEZONE: Asia/Kolkata
+      TZ: Asia/Kolkata
+
+      # A Code node runs JavaScript we did not necessarily write - a shared
+      # workflow, a template off the forum, a teammate's edit. With env access
+      # left open, one line of it reads the Postgres password out of this very
+      # block. Day 22's lesson, in a different pipeline: the trusted thing is
+      # the thing nobody inspected.
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "true"
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+
+      # No telemetry and no version pings. Partly hygiene, mostly so the
+      # answer to a client asking "what does this send out?" is "nothing".
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+    volumes:
+      - n8n_data:/home/node/.n8n
+      # Workflows are exported into the repo as JSON and imported back from
+      # it. The canvas is the editor; this folder is the source of truth.
+      - ./workflows:/workflows
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5678/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  db_data:
+  n8n_data:
