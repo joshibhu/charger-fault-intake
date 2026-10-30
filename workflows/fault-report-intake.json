@@ -12,7 +12,7 @@
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2.2,
       "position": [
-        -320,
+        -760,
         0
       ],
       "webhookId": "a1000000-0000-4000-8000-0000000000f1",
@@ -26,29 +26,83 @@
       "notesInFlow": true
     },
     {
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": false,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "n1",
+              "name": "channel",
+              "type": "string",
+              "value": "={{ $json.body.channel || 'webhook' }}"
+            },
+            {
+              "id": "n2",
+              "name": "inbound_id",
+              "type": "string",
+              "value": "={{ $json.body.message_id || ('n8n:' + $execution.id) }}"
+            },
+            {
+              "id": "n3",
+              "name": "reporter",
+              "type": "string",
+              "value": "={{ $json.body.reporter }}"
+            },
+            {
+              "id": "n4",
+              "name": "complaint",
+              "type": "string",
+              "value": "={{ $json.body.body }}"
+            },
+            {
+              "id": "n5",
+              "name": "payload",
+              "type": "string",
+              "value": "={{ JSON.stringify($json.body) }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        -540,
+        0
+      ],
+      "id": "f0a1b2c3-0001-4000-8000-000000000001",
+      "name": "Give the message an id",
+      "notes": "Every channel is normalised here and nowhere else. Adding WhatsApp means adding a trigger and a second copy of THIS node; nothing downstream changes. inbound_id is the sender's own message id, and when a channel has none it falls back to a per-execution value, which means no replay protection for that channel - stated rather than faked.",
+      "notesInFlow": true
+    },
+    {
       "id": "a1000000-0000-4000-8000-000000000002",
-      "name": "Store the report as it arrived",
+      "name": "Store it, or find the one we already have",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.8,
       "position": [
-        -100,
+        -320,
         0
       ],
       "parameters": {
         "operation": "executeQuery",
-        "query": "insert into intake.report (channel, reporter, body, payload)\nvalues ($1, $2, $3, $4::jsonb)\nreturning id",
+        "query": "with existing as (\n    select id, false as is_new\n    from intake.report\n    where channel = $1 and inbound_id = $2\n), inserted as (\n    insert into intake.report (channel, inbound_id, reporter, body, payload)\n    select $1, $2, nullif($3, ''), $4, $5::jsonb\n    where not exists (select 1 from existing)\n    returning id, true as is_new\n)\nselect * from inserted\nunion all\nselect * from existing",
         "options": {
-          "queryReplacement": "={{ $json.body.channel || 'webhook' }}, {{ $json.body.reporter }}, {{ $json.body.body }}, {{ JSON.stringify($json.body) }}"
+          "queryReplacement": "={{ $json.channel }}, {{ $json.inbound_id }}, {{ $json.reporter }}, {{ $json.complaint }}, {{ $json.payload }}"
         }
       },
-      "notes": "Saved BEFORE the model sees it. If OpenAI is down, rate-limits us or returns nonsense, the complaint is already on disk - a lost complaint is a charger nobody fixes. Values are bound as $1..$4, never pasted into the SQL, because this text comes from the internet.",
+      "notes": "Exactly one of the two CTEs produces a row, so this always returns one row and never updates anything - report stays insert-only. A true race (both copies inside one snapshot) makes the unique index raise, and the retry below finds the row on the second attempt: the retry IS the race handler. Measured against the on-conflict-do-update alternative, this also burns no sequence value on a replay.",
       "notesInFlow": true,
       "credentials": {
         "postgres": {
           "id": "I309p4vPbhcZrPIe",
           "name": "Postgres account"
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
     },
     {
       "id": "a1000000-0000-4000-8000-000000000003",
@@ -60,7 +114,7 @@
         0
       ],
       "parameters": {
-        "text": "={{ $('Fault report in').item.json.body.body }}",
+        "text": "={{ $('Give the message an id').item.json.complaint }}",
         "schemaType": "fromAttributes",
         "attributes": {
           "attributes": [
@@ -107,7 +161,10 @@
         }
       },
       "notes": "Each field's description IS the prompt for that field. severity is restricted to four words here as a request - and again in the database as a constraint, because only one of those two can actually refuse.",
-      "notesInFlow": true
+      "notesInFlow": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
     },
     {
       "id": "a1000000-0000-4000-8000-000000000004",
@@ -128,7 +185,7 @@
         "options": {
           "reasoningEffort": "low",
           "timeout": 30000,
-          "maxRetries": 2
+          "maxRetries": 1
         }
       },
       "notes": "Reasoning effort low, deliberately. On the sibling RAG project reasoning was ~89% of the bill; reading one short complaint is not a task that needs it. A 30s timeout and two retries, because a hung call holds the webhook open.",
@@ -157,7 +214,7 @@
               "id": "f1",
               "name": "report_id",
               "type": "number",
-              "value": "={{ $('Store the report as it arrived').item.json.id }}"
+              "value": "={{ $('Store it, or find the one we already have').item.json.id }}"
             },
             {
               "id": "f2",
@@ -231,7 +288,10 @@
           "id": "I309p4vPbhcZrPIe",
           "name": "Postgres account"
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
     },
     {
       "id": "a1000000-0000-4000-8000-000000000007",
@@ -249,6 +309,60 @@
       },
       "notes": "Every value is read from a NAMED node, not from $json. An item's shape changes at every node, and after an INSERT only the RETURNING columns survive - $json.report_id was undefined here and n8n dropped the key silently.",
       "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 4
+          },
+          "conditions": [
+            {
+              "id": "s1",
+              "leftValue": "={{ $json.is_new }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": false,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        -100,
+        0
+      ],
+      "id": "f0a1b2c3-0001-4000-8000-000000000002",
+      "name": "Is this a new message?",
+      "notes": "true means nobody has sent us this message id before, so it goes to the model. false means the provider delivered it twice: the reply is still a 200 with the original report id, because arguing with a retrying webhook provider is a losing game - but the model is never called, so a replay costs nothing. Idempotency and cost control turn out to be the same mechanism here.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"report\": $json.id, \"duplicate\": true, \"note\": \"already received; nothing stored, no model call\" } }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        160,
+        -220
+      ],
+      "id": "f0a1b2c3-0001-4000-8000-000000000003",
+      "name": "Tell them we already have it",
+      "notes": "The same 200 the first delivery got. A provider that reads anything other than 2xx will simply deliver a third time.",
+      "notesInFlow": true
     }
   ],
   "connections": {
@@ -256,18 +370,7 @@
       "main": [
         [
           {
-            "node": "Store the report as it arrived",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Store the report as it arrived": {
-      "main": [
-        [
-          {
-            "node": "Read the complaint",
+            "node": "Give the message an id",
             "type": "main",
             "index": 0
           }
@@ -312,6 +415,46 @@
         [
           {
             "node": "Reply to the reporter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Give the message an id": {
+      "main": [
+        [
+          {
+            "node": "Store it, or find the one we already have",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store it, or find the one we already have": {
+      "main": [
+        [
+          {
+            "node": "Is this a new message?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is this a new message?": {
+      "main": [
+        [
+          {
+            "node": "Read the complaint",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Tell them we already have it",
             "type": "main",
             "index": 0
           }
