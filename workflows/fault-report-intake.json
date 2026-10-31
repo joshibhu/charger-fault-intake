@@ -299,15 +299,15 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.5,
       "position": [
-        980,
-        0
+        1880,
+        -60
       ],
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ { \"report\": $('Decide if a human must see it').item.json.report_id, \"classification\": $json.id, \"severity\": $('Decide if a human must see it').item.json.severity, \"charger\": $('Decide if a human must see it').item.json.charger_label, \"symptom\": $('Decide if a human must see it').item.json.symptom, \"needs_human\": $json.needs_human, \"note\": $('Decide if a human must see it').item.json.note } }}",
+        "responseBody": "={{ { \"report\": $('Decide if a human must see it').item.json.report_id, \"classification\": $('Store what the model made of it').item.json.id, \"ticket\": $json.ticket_id, \"ticket_opened\": $json.ticket_opened === true, \"severity\": $('Decide if a human must see it').item.json.severity, \"charger\": $('Decide if a human must see it').item.json.charger_label, \"symptom\": $('Decide if a human must see it').item.json.symptom, \"needs_human\": false, \"note\": $('Decide if a human must see it').item.json.note } }}",
         "options": {}
       },
-      "notes": "Every value is read from a NAMED node, not from $json. An item's shape changes at every node, and after an INSERT only the RETURNING columns survive - $json.report_id was undefined here and n8n dropped the key silently.",
+      "notes": "Reached from two branches with two different item shapes, so everything but ticket_id and ticket_opened is read from a named node. ticket_opened tells the reporter which of the two happened: a new ticket, or their complaint joining one that was already open.",
       "notesInFlow": true
     },
     {
@@ -363,6 +363,181 @@
       "name": "Tell them we already have it",
       "notes": "The same 200 the first delivery got. A provider that reads anything other than 2xx will simply deliver a third time.",
       "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select (\n    select t.id\n    from intake.ticket t\n    where t.status = 'open'\n      and lower(btrim(t.charger_label)) = lower(btrim($1))\n      and coalesce(lower(btrim(t.site)), '') = coalesce(lower(btrim(nullif($2, ''))), '')\n    order by t.opened_at\n    limit 1\n) as ticket_id",
+        "options": {
+          "queryReplacement": "={{ $('Decide if a human must see it').item.json.charger_label }}, {{ $('Decide if a human must see it').item.json.site }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        940,
+        0
+      ],
+      "id": "f0a1b2c3-0003-4000-8000-000000000001",
+      "name": "Find an open ticket for this charger",
+      "notes": "Folds case and whitespace exactly as ticket_one_open_per_charger does - an index and a lookup that fold differently are two different questions, and the index always wins the argument. An empty charger_label matches nothing, which is correct: an unnamed charger cannot be deduplicated, and those complaints are exactly the ones a human has to read.",
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "I309p4vPbhcZrPIe",
+          "name": "Postgres account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 4
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.ticket_id != null }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": false,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        1160,
+        0
+      ],
+      "id": "f0a1b2c3-0003-4000-8000-000000000002",
+      "name": "Already on a ticket?",
+      "notes": "Deduplication sits BEFORE the approval gate on purpose. If the charger already has an open ticket, this complaint is more evidence for a fault we have already accepted - there is nothing for a human to decide and nobody new to dispatch. Putting it first is what keeps the review queue short.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with existing as (\n    select ticket_id, report_id, false as is_new\n    from intake.ticket_report\n    where report_id = $2\n), linked as (\n    insert into intake.ticket_report (ticket_id, report_id)\n    select $1, $2\n    where not exists (select 1 from existing)\n    returning ticket_id, report_id, true as is_new\n)\nselect * from linked\nunion all\nselect * from existing",
+        "options": {
+          "queryReplacement": "={{ $json.ticket_id }}, {{ $('Decide if a human must see it').item.json.report_id }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        1380,
+        -160
+      ],
+      "id": "f0a1b2c3-0003-4000-8000-000000000003",
+      "name": "Attach it to the open ticket",
+      "notes": "Three complaints, one ticket - this is the row that makes that true. Written with the same always-one-row shape as the report insert so that re-running this execution by hand from the n8n UI links nothing twice; ticket_report already refuses it at the index, this just stops the refusal from killing the branch.",
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "I309p4vPbhcZrPIe",
+          "name": "Postgres account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 4
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $('Decide if a human must see it').item.json.needs_human }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": false,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        1380,
+        160
+      ],
+      "id": "f0a1b2c3-0003-4000-8000-000000000004",
+      "name": "Does a human have to approve?",
+      "notes": "Only reaches here when no open ticket matched, so this is a fault we have not accepted yet. true means a person decides before anything is dispatched.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with t as (\n    insert into intake.ticket (site, charger_label, symptom, severity)\n    values (nullif($1, ''), $2, nullif($3, ''), $4)\n    returning id\n), l as (\n    insert into intake.ticket_report (ticket_id, report_id)\n    select t.id, $5 from t\n    returning ticket_id\n)\nselect id as ticket_id, true as ticket_opened from t",
+        "options": {
+          "queryReplacement": "={{ $('Decide if a human must see it').item.json.site }}, {{ $('Decide if a human must see it').item.json.charger_label }}, {{ $('Decide if a human must see it').item.json.symptom }}, {{ $('Decide if a human must see it').item.json.severity }}, {{ $('Decide if a human must see it').item.json.report_id }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        1620,
+        60
+      ],
+      "id": "f0a1b2c3-0003-4000-8000-000000000005",
+      "name": "Open a ticket",
+      "notes": "The confident, charger-named, not-critical path - no human needed. If two of these race, ticket_one_open_per_charger raises on the loser and the retry below re-runs the lookup, which by then finds the winner.",
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "I309p4vPbhcZrPIe",
+          "name": "Postgres account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"report\": $('Decide if a human must see it').item.json.report_id, \"classification\": $('Store what the model made of it').item.json.id, \"status\": \"under review\", \"severity\": $('Decide if a human must see it').item.json.severity, \"charger\": $('Decide if a human must see it').item.json.charger_label, \"note\": $('Decide if a human must see it').item.json.note, \"needs_human\": true } }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1620,
+        300
+      ],
+      "id": "f0a1b2c3-0003-4000-8000-000000000006",
+      "name": "Tell them a human will look at it",
+      "notes": "An acknowledgement, not an answer. The reporter cannot hold an HTTP request open while somebody reads their complaint, so the review branch replies now and does its work afterwards. The Wait node and the decision go after this node, not before it.",
+      "notesInFlow": true
     }
   ],
   "connections": {
@@ -414,7 +589,7 @@
       "main": [
         [
           {
-            "node": "Reply to the reporter",
+            "node": "Find an open ticket for this charger",
             "type": "main",
             "index": 0
           }
@@ -455,6 +630,75 @@
         [
           {
             "node": "Tell them we already have it",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find an open ticket for this charger": {
+      "main": [
+        [
+          {
+            "node": "Already on a ticket?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Already on a ticket?": {
+      "main": [
+        [
+          {
+            "node": "Attach it to the open ticket",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Does a human have to approve?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach it to the open ticket": {
+      "main": [
+        [
+          {
+            "node": "Reply to the reporter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Does a human have to approve?": {
+      "main": [
+        [
+          {
+            "node": "Tell them a human will look at it",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Open a ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Open a ticket": {
+      "main": [
+        [
+          {
+            "node": "Reply to the reporter",
             "type": "main",
             "index": 0
           }
