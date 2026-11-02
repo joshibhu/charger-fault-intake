@@ -299,6 +299,56 @@ ERROR:  new row violates check constraint "severity_is_known"
 ERROR:  new row violates check constraint "unsure_means_ask"
 ```
 
+## The measurement that decides what to build next
+
+One sentence, six runs, same prompt, same model, six fresh message ids so the
+replay branch could not answer instead:
+
+    id | charger | symptom                            | confident
+    19 | []      | DC-1 se tez awaaz aur dhuan        |     t      label in the wrong field
+    23 | [DC-1]  | tez awaaz aur dhuan nikal raha hai |     t
+    24 | [DC-1]  | tez awaaz aur dhuan nikal raha hai |     t
+    25 | [DC-1]  | tez awaaz aur dhuan nikal raha hai |     t
+    26 | [DC-1]  | tez awaaz aur dhuan nikal raha hai |     t
+    27 | []      | Tez awaaz aur dhuan nikal raha hai |     t      label gone entirely
+
+Four extractions, two misses, and the two misses are not even the same kind of
+miss - once `DC-1` landed in `symptom`, once it vanished. All six reported
+`confident = true`.
+
+The first guess was that `DC-1` looks like a system identifier and the system
+prompt's instruction not to resolve one was suppressing extraction. Three
+probes killed that: the same label in two other phrasings extracted cleanly
+and joined ticket 10. What is left is run-to-run variance at roughly one miss
+in three, and a wrong mechanism confidently stated is worse than no mechanism,
+so it is recorded as variance and not as a theory.
+
+**Three things follow, and all three are about reliability rather than
+prompting.**
+
+A rule that holds four times in six is not a rule. A routing decision cannot
+rest on a field the model fills non-deterministically, and no rewording of the
+field's description changes that - this is the Day 23 finding with a number
+attached.
+
+Retries do not help, which is the sharpest thing this day taught. The node did
+not fail; it succeeded with worse output. `retryOnFail`, `maxTries`,
+`waitBetweenTries` and the idempotent insert are all intact and none of them
+touch this. **Retries protect against errors, not against variance.**
+
+The design contained it anyway, and not by luck. `needs_human` tests the empty
+field directly rather than trusting the model's own `confident`, so both misses
+went to a human instead of quietly doing nothing. The constraint caught what
+the prompt could not. What was still lost was the escalation: the four good
+runs raised ticket 10 from high to critical, and a miss would have left a
+charger making loud noises and smoke sitting on a ticket marked high.
+
+So resolving the reporter's words to an identifier in the operator's own asset
+list stops being a nice-to-have. It has a measured failure rate behind it, and
+it is the one fix that closes the dedup gap, the escalation gap and this one at
+the same time - because against a real asset list "DC-1" either exists or it
+does not, and nothing is left to a sampling temperature.
+
 ## Known gaps, stated rather than discovered
 
 - **An escalation tells nobody.** A complaint reporting sparks and a burning
@@ -319,6 +369,9 @@ ERROR:  new row violates check constraint "unsure_means_ask"
   message. That needs a public hostname: a tunnel, or the day-26 VPS.
 - **The gate has no deadline.** An approval nobody opens waits for ever and
   there is no reminder sweep.
+- **The charger label is extracted non-deterministically.** Measured at two
+  misses in six runs of one sentence, with `confident = true` every time. See
+  the section above; this is the top of the list.
 - **Dedup compares the reporter's own words.** Case and whitespace are folded;
   "charger no 2" and "the DC one" still open their own tickets. The same
   vocabulary gap as the RAG project next door, in different clothes, and the

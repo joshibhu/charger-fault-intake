@@ -109,7 +109,11 @@ Fixed-price projects die here, so it is written before it is argued about:
 
 - Resolving the words a reporter uses into the client's own charger
   identifiers. "charger no 2" and "the DC one" still open their own tickets
-  today. This needs their asset data and is its own discovery exercise.
+  today, and the extraction itself misses an explicitly written label about
+  once in three runs of the same sentence - measured, not feared. This needs
+  their asset data and is its own discovery exercise. It is also the single
+  most valuable thing to quote next, because it is the one fix that closes
+  deduplication, escalation and extraction together.
 - Integration with an existing ticketing system (Freshdesk, Zoho, Jira).
 - Meta Business verification and WhatsApp template approval, and DLT
   registration if SMS is wanted.
