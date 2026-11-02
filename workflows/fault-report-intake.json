@@ -304,10 +304,10 @@
       ],
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ { \"report\": $('Decide if a human must see it').item.json.report_id, \"classification\": $('Store what the model made of it').item.json.id, \"ticket\": $json.ticket_id, \"ticket_opened\": $json.ticket_opened === true, \"severity\": $('Decide if a human must see it').item.json.severity, \"charger\": $('Decide if a human must see it').item.json.charger_label, \"symptom\": $('Decide if a human must see it').item.json.symptom, \"needs_human\": false, \"note\": $('Decide if a human must see it').item.json.note } }}",
+        "responseBody": "={{ { \"report\": $('Decide if a human must see it').item.json.report_id, \"classification\": $('Store what the model made of it').item.json.id, \"ticket\": $json.ticket_id, \"ticket_opened\": $json.ticket_opened === true, \"escalated_to\": $json.escalated_to || null, \"severity\": $('Decide if a human must see it').item.json.severity, \"charger\": $('Decide if a human must see it').item.json.charger_label, \"symptom\": $('Decide if a human must see it').item.json.symptom, \"needs_human\": $('Decide if a human must see it').item.json.needs_human, \"note\": $('Decide if a human must see it').item.json.note } }}",
         "options": {}
       },
-      "notes": "Reached from two branches with two different item shapes, so everything but ticket_id and ticket_opened is read from a named node. ticket_opened tells the reporter which of the two happened: a new ticket, or their complaint joining one that was already open.",
+      "notes": "Reached from two branches with two different item shapes, so everything but ticket_id, ticket_opened and escalated_to is read from a named node. needs_human is reported as the classification recorded it, not as a constant: on the attach branch it can be true while no human is ever told, and a reply that hides that is worse than the gap it hides. escalated_to is non-null only when this complaint raised the ticket it joined.",
       "notesInFlow": true
     },
     {
@@ -432,9 +432,9 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "with existing as (\n    select ticket_id, report_id, false as is_new\n    from intake.ticket_report\n    where report_id = $2\n), linked as (\n    insert into intake.ticket_report (ticket_id, report_id)\n    select $1, $2\n    where not exists (select 1 from existing)\n    returning ticket_id, report_id, true as is_new\n)\nselect * from linked\nunion all\nselect * from existing",
+        "query": "with existing as (\n    select ticket_id, report_id, false as is_new\n    from intake.ticket_report\n    where report_id = $2\n), linked as (\n    insert into intake.ticket_report (ticket_id, report_id)\n    select $1, $2\n    where not exists (select 1 from existing)\n    returning ticket_id, report_id, true as is_new\n), joined as (\n    select * from linked union all select * from existing\n), escalated as (\n    update intake.ticket t\n       set severity = $3, symptom = $4\n     where t.id = $1\n       and array_position(array['low', 'normal', 'high', 'critical'], $3)\n         > array_position(array['low', 'normal', 'high', 'critical'], t.severity)\n    returning t.id, t.severity\n)\nselect j.ticket_id, j.report_id, j.is_new,\n       (select severity from escalated) as escalated_to\nfrom joined j",
         "options": {
-          "queryReplacement": "={{ $json.ticket_id }}, {{ $('Decide if a human must see it').item.json.report_id }}"
+          "queryReplacement": "={{ $json.ticket_id }}, {{ $('Decide if a human must see it').item.json.report_id }}, {{ $('Decide if a human must see it').item.json.severity }}, {{ $('Decide if a human must see it').item.json.symptom }}"
         }
       },
       "type": "n8n-nodes-base.postgres",
@@ -445,7 +445,7 @@
       ],
       "id": "f0a1b2c3-0003-4000-8000-000000000003",
       "name": "Attach it to the open ticket",
-      "notes": "Three complaints, one ticket - this is the row that makes that true. Written with the same always-one-row shape as the report insert so that re-running this execution by hand from the n8n UI links nothing twice; ticket_report already refuses it at the index, this just stops the refusal from killing the branch.",
+      "notes": "Three complaints, one ticket - and the ticket now learns. A joining complaint whose severity outranks the ticket raises it; one that ranks lower changes nothing, so a cosmetic report can never quieten a critical ticket. Without this, a charger reported as sparking after being reported as tripping would sit at high for ever, and the dispatcher reads the ticket, not the reports. array_position over an ordered array is the ranking, because the four words have an order that text comparison does not know about.",
       "notesInFlow": true,
       "credentials": {
         "postgres": {
@@ -531,13 +531,196 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.5,
       "position": [
-        1620,
+        1860,
         300
       ],
       "id": "f0a1b2c3-0003-4000-8000-000000000006",
       "name": "Tell them a human will look at it",
       "notes": "An acknowledgement, not an answer. The reporter cannot hold an HTTP request open while somebody reads their complaint, so the review branch replies now and does its work afterwards. The Wait node and the decision go after this node, not before it.",
       "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "resume": "form",
+        "formTitle": "={{ 'Fault report ' + $('Decide if a human must see it').item.json.report_id + ' needs a decision' }}",
+        "formDescription": "={{ 'WHAT THEY SENT\\n' + $('Give the message an id').item.json.complaint + '\\n\\nWHAT THE MODEL READ\\nsite: ' + ($('Decide if a human must see it').item.json.site || '(none)') + '\\ncharger: ' + ($('Decide if a human must see it').item.json.charger_label || '(none)') + '\\nsymptom: ' + $('Decide if a human must see it').item.json.symptom + '\\nseverity: ' + $('Decide if a human must see it').item.json.severity + '\\n\\nWHY THIS STOPPED HERE\\n' + ($('Decide if a human must see it').item.json.note || 'the model was unsure, or called this critical') }}",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Decision",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Approve"
+                  },
+                  {
+                    "option": "Reject"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Site",
+              "fieldType": "text",
+              "defaultValue": "={{ $('Decide if a human must see it').item.json.site }}",
+              "requiredField": false
+            },
+            {
+              "fieldLabel": "Charger",
+              "fieldType": "text",
+              "defaultValue": "={{ $('Decide if a human must see it').item.json.charger_label }}",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Reviewer",
+              "fieldType": "text",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Why",
+              "fieldType": "textarea",
+              "requiredField": false
+            }
+          ]
+        },
+        "options": {
+          "formSubmittedText": "Recorded. You can close this page."
+        }
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2100,
+        300
+      ],
+      "id": "f0a1b2c3-0004-4000-8000-000000000001",
+      "name": "Wait for a person to decide",
+      "webhookId": "c7f1a6d2-4e55-4a1c-9b3e-2d80f6a9e011",
+      "notes": "The execution is written to the database and sleeps here; submitting the form at /form-waiting/<executionId> wakes it. No thread is held, so a pending approval survives a container restart. This is the human task of a workflow engine, not a blocking call. It has no deadline, which is a known gap - an approval nobody opens waits for ever, and there is no reminder yet.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 4
+          },
+          "conditions": [
+            {
+              "id": "a1",
+              "leftValue": "={{ $('Wait for a person to decide').item.json.Decision === 'Approve' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": false,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        2320,
+        300
+      ],
+      "id": "f0a1b2c3-0004-4000-8000-000000000002",
+      "name": "Approved?",
+      "notes": "Everything that writes a ticket lives on the true side. That is what makes \"a rejected approval leaves no side effects\" a property of the shape of this workflow rather than a promise about its code.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with d as (\n    insert into intake.decision\n        (report_id, decided_by, approved, reason, site, charger_label)\n    values ($1, $2, true, nullif($3, ''), nullif($4, ''), $5)\n    returning report_id, site, charger_label\n), existing as (\n    select t.id\n    from intake.ticket t, d\n    where t.status = 'open'\n      and lower(btrim(t.charger_label)) = lower(btrim(d.charger_label))\n      and coalesce(lower(btrim(t.site)), '') = coalesce(lower(btrim(d.site)), '')\n    limit 1\n), opened as (\n    insert into intake.ticket (site, charger_label, symptom, severity)\n    select d.site, d.charger_label, nullif($6, ''), $7 from d\n    where not exists (select 1 from existing)\n    returning id\n), chosen as (\n    select id, true as ticket_opened from opened\n    union all\n    select id, false from existing\n), l as (\n    insert into intake.ticket_report (ticket_id, report_id)\n    select c.id, $1 from chosen c\n    returning ticket_id\n)\nselect id as ticket_id, ticket_opened from chosen",
+        "options": {
+          "queryReplacement": "={{ $('Decide if a human must see it').item.json.report_id }}, {{ $('Wait for a person to decide').item.json.Reviewer }}, {{ $('Wait for a person to decide').item.json.Why }}, {{ $('Wait for a person to decide').item.json.Site }}, {{ $('Wait for a person to decide').item.json.Charger }}, {{ $('Decide if a human must see it').item.json.symptom }}, {{ $('Decide if a human must see it').item.json.severity }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        2560,
+        200
+      ],
+      "id": "f0a1b2c3-0004-4000-8000-000000000003",
+      "name": "Record the approval and open or join a ticket",
+      "notes": "The reviewer's site and charger win over the model's, because the model leaving charger blank is usually why this complaint stopped here at all. Symptom and severity still come from the model - the reviewer was asked to identify the charger, not to re-diagnose the fault.",
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "I309p4vPbhcZrPIe",
+          "name": "Postgres account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "insert into intake.decision (report_id, decided_by, approved, reason)\nvalues ($1, $2, false, nullif($3, ''))\nreturning id, approved",
+        "options": {
+          "queryReplacement": "={{ $('Decide if a human must see it').item.json.report_id }}, {{ $('Wait for a person to decide').item.json.Reviewer }}, {{ $('Wait for a person to decide').item.json.Why }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        2560,
+        440
+      ],
+      "id": "f0a1b2c3-0004-4000-8000-000000000004",
+      "name": "Record the rejection, and nothing else",
+      "notes": "The only row a rejection writes. No ticket, no link, no message - and no charger either, even though the form collected one. This table is the gate itself, not a side effect of it: a review nobody can audit is indistinguishable from no review.",
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "I309p4vPbhcZrPIe",
+          "name": "Postgres account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "insert into intake.pending_review (report_id, execution_id, review_url)\nvalues ($1, $2, $3)\non conflict (report_id) do update\n    set execution_id = excluded.execution_id,\n        review_url   = excluded.review_url,\n        queued_at    = now()\nreturning report_id, execution_id",
+        "options": {
+          "queryReplacement": "={{ $('Decide if a human must see it').item.json.report_id }}, {{ $execution.id }}, {{ $execution.resumeFormUrl }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        1620,
+        300
+      ],
+      "id": "f0a1b2c3-0004-4000-8000-000000000005",
+      "name": "Put it in the review queue",
+      "notes": "Written BEFORE the reporter is told \"under review\", because saying it first and queueing second means a failed insert leaves a promise nobody can keep. $execution.resumeFormUrl carries the resume token n8n signs the waiting form with; without it the form answers 401, so this row is the only way anyone finds the gate. Read it through intake.review_queue, which drops a row the moment a decision exists - pending is derived, never stored.",
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "I309p4vPbhcZrPIe",
+          "name": "Postgres account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
     }
   ],
   "connections": {
@@ -680,7 +863,7 @@
       "main": [
         [
           {
-            "node": "Tell them a human will look at it",
+            "node": "Put it in the review queue",
             "type": "main",
             "index": 0
           }
@@ -699,6 +882,57 @@
         [
           {
             "node": "Reply to the reporter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tell them a human will look at it": {
+      "main": [
+        [
+          {
+            "node": "Wait for a person to decide",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for a person to decide": {
+      "main": [
+        [
+          {
+            "node": "Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approved?": {
+      "main": [
+        [
+          {
+            "node": "Record the approval and open or join a ticket",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record the rejection, and nothing else",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Put it in the review queue": {
+      "main": [
+        [
+          {
+            "node": "Tell them a human will look at it",
             "type": "main",
             "index": 0
           }
